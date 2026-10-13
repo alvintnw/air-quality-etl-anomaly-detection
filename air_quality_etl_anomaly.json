@@ -1,0 +1,718 @@
+{
+  "name": "Air Quality ETL with Anomaly Detection (Open-Meteo + Postgres + Telegram)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Air Quality ETL + Anomaly Detection\nExtract hourly air quality for your locations from the Open-Meteo Air Quality API (CAMS model data), validate it, upsert it into PostgreSQL, detect anomalies, and report on Telegram.\n\n**Before running:**\n1. Run sql/schema.sql on PostgreSQL (it seeds 5 sample locations; edit the `locations` table)\n2. Attach credentials: Telegram, Postgres\n3. Replace `REPLACE_WITH_ALERT_CHAT_ID` in the Telegram nodes\n4. In Workflow Settings set 'Error Workflow' to this workflow\n5. Run 'Manual Backfill' once to load 30 days of history (anomaly detection needs about 2 days)\n\nData: CAMS via Open-Meteo. Free for non-commercial use, attribution required.",
+        "height": 380,
+        "width": 640,
+        "color": 4
+      },
+      "id": "e964a1e6-a410-4a1f-9bb0-66fe30960138",
+      "name": "Notes - General",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -160,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Extract and load\nOne request per location, 1 per second (rate limiting), 3 tries with a 2 s wait (retry), and a failed location never stops the others. Values outside physical ranges become NULL and are counted. The upsert only touches rows whose values changed, so model revisions are tracked and re-runs are harmless.",
+        "height": 200,
+        "width": 580,
+        "color": 5
+      },
+      "id": "4c60fdd4-ae35-4eab-8ead-78e902b0e364",
+      "name": "Notes - Extract",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        700,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Anomaly detection (in SQL)\n1. **threshold**: US AQI at or above the location's alert level\n2. **spike**: PM2.5 robust z-score (median and MAD over 7 days) >= 3.5 AND at least 15 ug/m3 above the median\n3. **stale_data**: no reading newer than 3 hours (pipeline health)\nA 6 hour cooldown per location and type avoids repeats. A higher severity bypasses it.",
+        "height": 240,
+        "width": 560,
+        "color": 6
+      },
+      "id": "d2534e74-40da-4e6a-b651-270bfdd6f4ac",
+      "name": "Notes - Anomalies",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "5 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "eb4b6c3b-1ba2-4364-819b-80ac388e1032",
+      "name": "Hourly Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        100
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "de5660d6-7c91-4e60-9b65-9dd1403c85bf",
+      "name": "Manual Backfill",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "959b79d4-9e3f-46fe-9f31-94a77aaf9c80",
+              "name": "past_days",
+              "value": "2",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8e0e145b-1f34-4b93-b939-3dace2349cb4",
+      "name": "Window - Hourly",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "d0d1de3f-57aa-4403-8d1e-a8c91fec68ea",
+              "name": "past_days",
+              "value": "30",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c6afc5b9-f828-40f9-9128-1578bb92cedd",
+      "name": "Window - Backfill",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, latitude, longitude, $1::int AS past_days\nFROM locations\nWHERE enabled\nORDER BY id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.past_days ] }}"
+        }
+      },
+      "id": "82850358-3208-4406-9a61-0e66d651a0c7",
+      "name": "Load Locations",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://air-quality-api.open-meteo.com/v1/air-quality",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "latitude",
+              "value": "={{ $json.latitude }}"
+            },
+            {
+              "name": "longitude",
+              "value": "={{ $json.longitude }}"
+            },
+            {
+              "name": "hourly",
+              "value": "pm2_5,pm10,nitrogen_dioxide,ozone,sulphur_dioxide,carbon_monoxide,us_aqi"
+            },
+            {
+              "name": "past_days",
+              "value": "={{ $json.past_days }}"
+            },
+            {
+              "name": "forecast_days",
+              "value": "1"
+            },
+            {
+              "name": "timezone",
+              "value": "UTC"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "c4a540cf-fc91-43fa-9a4c-e4ae670bbd87",
+      "name": "Fetch Air Quality",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        760,
+        200
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const locs = $('Load Locations').all().map(i => i.json);\nconst responses = $input.all().map(i => i.json);\n\n// Plausible physical ranges (ug/m3, AQI). Values outside are treated as invalid and stored as NULL.\nconst LIMITS = {\n  pm2_5: [0, 1000], pm10: [0, 2000], nitrogen_dioxide: [0, 2000], ozone: [0, 1000],\n  sulphur_dioxide: [0, 2000], carbon_monoxide: [0, 100000], us_aqi: [0, 500]\n};\nconst METRICS = Object.keys(LIMITS);\nconst now = Date.now();\n\nconst byKey = new Map();\nconst failures = [];\nlet invalid = 0;\n\nresponses.forEach((res, i) => {\n  const loc = locs[i];            // HTTP responses keep the order of the locations\n  if (!loc) return;\n  const h = res && res.hourly;\n  if (!res || res.error || !h || !Array.isArray(h.time)) {\n    const why = (res && (res.reason || (typeof res.error === 'string' ? res.error : (res.error && res.error.message)))) || 'no hourly data in response';\n    failures.push(loc.name + ': ' + String(why).slice(0, 120));\n    return;\n  }\n  h.time.forEach((t, idx) => {\n    const iso = /(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(String(t)) ? String(t) : t + 'Z';   // requested timezone is UTC\n    const ts = Date.parse(iso);\n    if (!Number.isFinite(ts) || ts > now) return;                                    // skip forecast hours\n    const row = { location_id: Number(loc.id), observed_at: new Date(ts).toISOString() };\n    let any = false;\n    for (const m of METRICS) {\n      const raw = h[m] ? h[m][idx] : null;\n      if (raw === null || raw === undefined) { row[m] = null; continue; }\n      const v = Number(raw);\n      const [lo, hi] = LIMITS[m];\n      if (!Number.isFinite(v) || v < lo || v > hi) { invalid++; row[m] = null; continue; }\n      row[m] = m === 'us_aqi' ? Math.round(v) : v;\n      any = true;\n    }\n    if (any) byKey.set(row.location_id + '|' + row.observed_at, row);\n  });\n});\n\nconst rows = [...byKey.values()];\nreturn [{ json: {\n  rows_json: JSON.stringify(rows),\n  rows_count: rows.length,\n  locations_total: locs.length,\n  locations_failed: failures.length,\n  rows_invalid: invalid,\n  failures_text: failures.join('; ')\n} }];"
+      },
+      "id": "eed989ef-7a82-491f-9c1e-5dd4e21a015c",
+      "name": "Transform & Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH input AS (\n  SELECT * FROM json_to_recordset($1::json) AS x(\n    location_id int, observed_at timestamptz, pm2_5 numeric, pm10 numeric,\n    nitrogen_dioxide numeric, ozone numeric, sulphur_dioxide numeric,\n    carbon_monoxide numeric, us_aqi int\n  )\n),\nup AS (\n  INSERT INTO readings AS r (location_id, observed_at, pm2_5, pm10, no2, o3, so2, co, us_aqi)\n  SELECT location_id, observed_at, pm2_5, pm10, nitrogen_dioxide, ozone, sulphur_dioxide, carbon_monoxide, us_aqi\n  FROM input\n  ON CONFLICT (location_id, observed_at) DO UPDATE SET\n    pm2_5 = EXCLUDED.pm2_5, pm10 = EXCLUDED.pm10, no2 = EXCLUDED.no2, o3 = EXCLUDED.o3,\n    so2 = EXCLUDED.so2, co = EXCLUDED.co, us_aqi = EXCLUDED.us_aqi, ingested_at = now()\n  WHERE (r.pm2_5, r.pm10, r.no2, r.o3, r.so2, r.co, r.us_aqi)\n        IS DISTINCT FROM (EXCLUDED.pm2_5, EXCLUDED.pm10, EXCLUDED.no2, EXCLUDED.o3, EXCLUDED.so2, EXCLUDED.co, EXCLUDED.us_aqi)\n  RETURNING (xmax = 0) AS inserted\n),\ncounts AS (\n  SELECT COUNT(*) FILTER (WHERE inserted)::int AS ins,\n         COUNT(*) FILTER (WHERE NOT inserted)::int AS upd\n  FROM up\n)\nINSERT INTO etl_runs (locations_total, locations_failed, rows_received, rows_invalid, rows_inserted, rows_updated, failures)\nSELECT $2::int, $3::int, (SELECT COUNT(*)::int FROM input), $4::int, c.ins, c.upd, NULLIF($5::text, '')\nFROM counts c\nRETURNING id AS run_id, rows_received, rows_inserted, rows_updated;",
+        "options": {
+          "queryReplacement": "={{ [ $json.rows_json, $json.locations_total, $json.locations_failed, $json.rows_invalid, $json.failures_text ] }}"
+        }
+      },
+      "id": "e7e89b2d-3c73-4c00-a75b-a8b5f561faee",
+      "name": "Upsert Readings",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1280,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH latest AS (\n  SELECT DISTINCT ON (r.location_id) r.location_id, r.observed_at, r.pm2_5, r.us_aqi\n  FROM readings r\n  JOIN locations l ON l.id = r.location_id AND l.enabled\n  ORDER BY r.location_id, r.observed_at DESC\n),\nhist AS (\n  SELECT lt.location_id, r.pm2_5\n  FROM latest lt\n  JOIN readings r ON r.location_id = lt.location_id\n   AND r.observed_at >= lt.observed_at - interval '7 days'\n   AND r.observed_at <  lt.observed_at\n  WHERE r.pm2_5 IS NOT NULL\n),\nmed AS (\n  SELECT location_id, COUNT(*) AS n,\n         percentile_cont(0.5) WITHIN GROUP (ORDER BY pm2_5) AS median\n  FROM hist GROUP BY location_id\n),\ndev AS (\n  SELECT h.location_id,\n         percentile_cont(0.5) WITHIN GROUP (ORDER BY ABS(h.pm2_5 - m.median)) AS mad\n  FROM hist h JOIN med m USING (location_id)\n  GROUP BY h.location_id\n),\ncand AS (\n  SELECT lo.id AS location_id, lt.observed_at, lt.pm2_5, lt.us_aqi, lo.alert_aqi, m.n, m.median,\n         0.6745 * (lt.pm2_5 - m.median) / GREATEST(d.mad, 2.0) AS z\n  FROM locations lo\n  LEFT JOIN latest lt ON lt.location_id = lo.id\n  LEFT JOIN med m ON m.location_id = lo.id\n  LEFT JOIN dev d ON d.location_id = lo.id\n  WHERE lo.enabled\n),\ndetected AS (\n  SELECT location_id, 'threshold'::text AS alert_type,\n         CASE WHEN us_aqi >= 301 THEN 'critical' WHEN us_aqi >= 201 THEN 'high' ELSE 'medium' END AS severity,\n         observed_at, us_aqi::numeric AS value, NULL::numeric AS baseline, NULL::numeric AS zscore\n  FROM cand\n  WHERE us_aqi IS NOT NULL AND us_aqi >= alert_aqi\n  UNION ALL\n  SELECT location_id, 'spike', CASE WHEN z >= 6 THEN 'high' ELSE 'medium' END,\n         observed_at, pm2_5, ROUND(median::numeric, 1), ROUND(z::numeric, 1)\n  FROM cand\n  WHERE n >= 48 AND pm2_5 IS NOT NULL AND z >= 3.5 AND pm2_5 - median >= 15\n  UNION ALL\n  SELECT location_id, 'stale_data', 'medium', COALESCE(observed_at, 'epoch'::timestamptz), NULL, NULL, NULL\n  FROM cand\n  WHERE observed_at IS NULL OR observed_at < now() - interval '3 hours'\n),\nfresh AS (\n  SELECT d.* FROM detected d\n  WHERE NOT EXISTS (\n    SELECT 1 FROM alerts a\n    WHERE a.location_id = d.location_id\n      AND a.alert_type = d.alert_type\n      AND a.created_at > now() - interval '6 hours'\n      AND CASE a.severity WHEN 'critical' THEN 3 WHEN 'high' THEN 2 ELSE 1 END\n       >= CASE d.severity WHEN 'critical' THEN 3 WHEN 'high' THEN 2 ELSE 1 END\n  )\n),\nins AS (\n  INSERT INTO alerts (location_id, alert_type, severity, observed_at, value, baseline, zscore)\n  SELECT location_id, alert_type, severity, observed_at, value, baseline, zscore FROM fresh\n  ON CONFLICT (location_id, alert_type, observed_at) DO NOTHING\n  RETURNING id, location_id, alert_type, severity, observed_at, value, baseline, zscore\n)\nSELECT i.id, lo.name, i.alert_type, i.severity, i.observed_at, i.value, i.baseline, i.zscore,\n       CASE WHEN i.alert_type = 'threshold' THEN aqi_category(i.value::int) END AS category\nFROM ins i\nJOIN locations lo ON lo.id = i.location_id\nORDER BY CASE i.severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 ELSE 3 END, lo.name;",
+        "options": {}
+      },
+      "id": "91110e4c-5f42-4b3e-ad9c-7594ef65e1fe",
+      "name": "Detect Anomalies",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        340
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const rows = $input.all().map(i => i.json);\nconst fmt = d => new Date(d).toLocaleString('en-GB', { timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) + ' WIB';\nconst lines = rows.map(r => {\n  const sev = String(r.severity).toUpperCase();\n  if (r.alert_type === 'threshold') {\n    return '[' + sev + '] ' + r.name + ': US AQI ' + Math.round(Number(r.value)) + ' (' + r.category + ') at ' + fmt(r.observed_at);\n  }\n  if (r.alert_type === 'spike') {\n    return '[' + sev + '] ' + r.name + ': PM2.5 spike ' + Number(r.value).toFixed(1) + ' ug/m3 vs typical ' + Number(r.baseline).toFixed(1) + ' (z=' + Number(r.zscore).toFixed(1) + ') at ' + fmt(r.observed_at);\n  }\n  const never = new Date(r.observed_at).getFullYear() < 2000;\n  return '[' + sev + '] ' + r.name + ': ' + (never ? 'no data has been ingested yet' : 'no new data since ' + fmt(r.observed_at));\n});\nconst text = 'AIR QUALITY ALERTS (' + rows.length + ')\\n\\n' + lines.join('\\n') +\n  '\\n\\nModelled estimates (CAMS via Open-Meteo), not ground sensor readings.';\nreturn [{ json: { text } }];"
+      },
+      "id": "e8b115d7-180a-40c5-bfa9-37f9629979cb",
+      "name": "Format Alerts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1f89b09f-bdb9-42e6-9fb0-b7b9d940c391",
+              "leftValue": "={{ $('Transform & Validate').first().json.locations_failed > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "cf44d94e-e9a4-47e9-9f68-5df7ee384470",
+      "name": "Data Issues?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const t = $('Transform & Validate').first().json;\nconst run = $input.first().json;\nlet text = 'ETL WARNING: ' + t.locations_failed + ' of ' + t.locations_total + ' location(s) failed to load\\n\\n';\ntext += String(t.failures_text).split('; ').filter(Boolean).map(s => '- ' + s).join('\\n');\ntext += '\\n\\nRun #' + run.run_id + ': ' + run.rows_inserted + ' inserted, ' + run.rows_updated + ' updated, ' + t.rows_invalid + ' invalid value(s) nulled.';\nreturn [{ json: { text } }];"
+      },
+      "id": "71361530-96ec-484d-bdc8-b4c066bfb0b5",
+      "name": "Format ETL Warning",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "REPLACE_WITH_ALERT_CHAT_ID",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "39ae4d4e-7f08-474f-8d1a-c7226431d313",
+      "name": "Send Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2060,
+        200
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * *"
+            }
+          ]
+        }
+      },
+      "id": "d861ed62-f963-4d1f-bda1-a7ada71faec5",
+      "name": "Daily Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH a AS (DELETE FROM etl_runs WHERE started_at < now() - interval '90 days' RETURNING 1),\n     b AS (DELETE FROM alerts   WHERE created_at < now() - interval '180 days' RETURNING 1)\nSELECT (SELECT COUNT(*)::int FROM a) AS runs_purged, (SELECT COUNT(*)::int FROM b) AS alerts_purged;",
+        "options": {}
+      },
+      "id": "a183c5ff-cb76-4360-aa9a-1164cc96ec4c",
+      "name": "Purge Old Logs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        260,
+        700
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH day AS (\n  SELECT date_trunc('day', now() AT TIME ZONE 'Asia/Jakarta') - interval '1 day' AS d0\n),\nstats AS (\n  SELECT lo.name,\n         ROUND(AVG(r.pm2_5), 1) AS avg_pm25,\n         ROUND(MAX(r.pm2_5), 1) AS max_pm25,\n         MAX(r.us_aqi)          AS max_aqi,\n         COUNT(*) FILTER (WHERE r.us_aqi >= lo.alert_aqi) AS hours_over,\n         COUNT(r.pm2_5)         AS hours_with_data\n  FROM locations lo\n  LEFT JOIN readings r\n         ON r.location_id = lo.id\n        AND (r.observed_at AT TIME ZONE 'Asia/Jakarta') >= (SELECT d0 FROM day)\n        AND (r.observed_at AT TIME ZONE 'Asia/Jakarta') <  (SELECT d0 FROM day) + interval '1 day'\n  WHERE lo.enabled\n  GROUP BY lo.id, lo.name, lo.alert_aqi\n)\nSELECT (SELECT d0::date FROM day) AS day,\n       COALESCE((SELECT jsonb_agg(to_jsonb(s) ORDER BY s.max_aqi DESC NULLS LAST, s.name) FROM stats s), '[]'::jsonb) AS locations,\n       (SELECT COUNT(*)::int FROM alerts WHERE created_at >= now() - interval '24 hours') AS alerts_24h,\n       (SELECT COUNT(*)::int FROM etl_runs WHERE started_at >= now() - interval '24 hours') AS runs_24h,\n       (SELECT COUNT(*)::int FROM etl_runs WHERE started_at >= now() - interval '24 hours' AND locations_failed > 0) AS runs_with_failures_24h;",
+        "options": {}
+      },
+      "id": "6b96326d-748a-4b60-8eae-d4a803a7587f",
+      "name": "Daily Digest Query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        520,
+        700
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const r = $input.first().json;\nconst locs = Array.isArray(r.locations) ? r.locations : [];\nconst day = r.day ? new Date(r.day).toLocaleDateString('en-GB', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : 'yesterday';\nlet t = 'Air Quality Daily Digest\\n' + day + '\\n\\n';\nif (!locs.length) t += 'No locations are configured.\\n';\nelse {\n  t += locs.map(l => {\n    if (!Number(l.hours_with_data)) return l.name + ': no data';\n    return l.name + ': avg PM2.5 ' + l.avg_pm25 + ' | max ' + l.max_pm25 + ' | max AQI ' + l.max_aqi + (Number(l.hours_over) ? ' | ' + l.hours_over + ' h above alert level' : '');\n  }).join('\\n');\n}\nt += '\\n\\nAlerts in the last 24 h: ' + r.alerts_24h + '\\nETL runs: ' + r.runs_24h + ' (' + r.runs_with_failures_24h + ' with failures)';\nt += '\\n\\nModelled estimates (CAMS via Open-Meteo), not ground sensor readings.';\nreturn [{ json: { text: t } }];"
+      },
+      "id": "c875e3a7-8f58-4f8a-9faa-6c0b73dff619",
+      "name": "Format Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "REPLACE_WITH_ALERT_CHAT_ID",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "bf210ef5-aa13-44f1-b7fd-1c0d1f35370e",
+      "name": "Send Digest",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1040,
+        700
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "592ea7ba-9258-4dfd-bf94-4ca5be816b80",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const e = $input.first().json;\nconst wf = (e.workflow && e.workflow.name) || 'unknown workflow';\nconst node = (e.execution && e.execution.lastNodeExecuted) || 'unknown node';\nconst msg = (e.execution && e.execution.error && e.execution.error.message) || 'unknown error';\nconst url = (e.execution && e.execution.url) || '';\nreturn [{ json: { text: 'WORKFLOW ERROR\\n\\nWorkflow: ' + wf + '\\nFailed node: ' + node + '\\nError: ' + String(msg).slice(0, 500) + (url ? '\\n' + url : '') } }];"
+      },
+      "id": "3034103f-cc98-46e0-a737-109344a4aeaf",
+      "name": "Format Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "REPLACE_WITH_ALERT_CHAT_ID",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "06a3ed65-f31d-4f5f-88a3-3eec11e38d57",
+      "name": "Send Error Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        520,
+        1000
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_ID",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Hourly Schedule": {
+      "main": [
+        [
+          {
+            "node": "Window - Hourly",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Backfill": {
+      "main": [
+        [
+          {
+            "node": "Window - Backfill",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Window - Hourly": {
+      "main": [
+        [
+          {
+            "node": "Load Locations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Window - Backfill": {
+      "main": [
+        [
+          {
+            "node": "Load Locations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Locations": {
+      "main": [
+        [
+          {
+            "node": "Fetch Air Quality",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Air Quality": {
+      "main": [
+        [
+          {
+            "node": "Transform & Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform & Validate": {
+      "main": [
+        [
+          {
+            "node": "Upsert Readings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Readings": {
+      "main": [
+        [
+          {
+            "node": "Detect Anomalies",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Data Issues?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Anomalies": {
+      "main": [
+        [
+          {
+            "node": "Format Alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Alerts": {
+      "main": [
+        [
+          {
+            "node": "Send Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Data Issues?": {
+      "main": [
+        [
+          {
+            "node": "Format ETL Warning",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Format ETL Warning": {
+      "main": [
+        [
+          {
+            "node": "Send Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Schedule": {
+      "main": [
+        [
+          {
+            "node": "Purge Old Logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Purge Old Logs": {
+      "main": [
+        [
+          {
+            "node": "Daily Digest Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Digest Query": {
+      "main": [
+        [
+          {
+            "node": "Format Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Digest": {
+      "main": [
+        [
+          {
+            "node": "Send Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error": {
+      "main": [
+        [
+          {
+            "node": "Send Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Jakarta"
+  },
+  "active": false,
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
